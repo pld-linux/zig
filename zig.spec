@@ -1,6 +1,10 @@
+%bcond_with	bootstrap	# build with the precompiled compiler from upstream
+
 %define	gitref	ab30a0b9a
 %define	snap	20260905
 %define	zigver	0.17.0-dev.2018+%{gitref}
+
+%define	prebuilt_dir	%{name}-x86_64-linux-%{zigver}
 #
 Summary:	Programming language for maintaining robust, optimal and reusable software
 Summary(pl.UTF-8):	Język programowania do tworzenia niezawodnego, optymalnego oprogramowania wielokrotnego użytku
@@ -11,6 +15,8 @@ License:	MIT (compiler), MIT/BSD/LGPL v2.1+ and others (bundled libc sources)
 Group:		Development/Languages
 Source0:	https://ziglang.org/builds/%{name}-%{zigver}.tar.xz
 # Source0-md5:	f44255f821df694f0cb32946f3878076
+Source1:	https://ziglang.org/builds/%{name}-x86_64-linux-%{zigver}.tar.xz
+# Source1-md5:	b3b96a6d9f38474651c228ef7c1a0ae4
 URL:		https://ziglang.org/
 # cmake/Findllvm.cmake accepts one LLVM major only and errors out on anything
 # else, so this tracks whichever zig snapshot matches the LLVM PLD ships.
@@ -19,9 +25,13 @@ BuildRequires:	cmake >= 3.15
 BuildRequires:	libstdc++-devel
 BuildRequires:	lld-devel >= 22.0.0
 BuildRequires:	llvm-devel >= 22.0.0
+%if %{without bootstrap}
+BuildRequires:	%{name}
+%endif
 Requires:	%{name}-libs = %{version}-%{release}
-# Bootstrap compiles a 222 MB generated zig2.c in one translation unit, peaking
-# at ~12 GB in cc1 - far past what a 32-bit address space can hold.
+# ix86 cannot build this: linking the compiler against LLVM exhausts the 32-bit
+# address space even with -Dstrip and -Doptimize=ReleaseSmall ("LLVM ERROR: out
+# of memory"), and the cmake zig2.c bootstrap needs ~12 GB in a single cc1.
 ExclusiveArch:	%{x8664}
 BuildRoot:	%{tmpdir}/%{name}-%{version}-root-%(id -u -n)
 
@@ -58,24 +68,42 @@ programów.
 
 %prep
 %setup -q -n %{name}-%{zigver}
+%if %{with bootstrap}
+tar xJf %{SOURCE1}
+%endif
 
 %build
 install -d build
 cd build
-# RelWithDebInfo is the only build type for which CMakeLists.txt does not append
-# -Dstrip to the stage3 zig build, so it is what keeps debuginfo.
 %cmake .. \
-	-DCMAKE_BUILD_TYPE=RelWithDebInfo \
-	-DCMAKE_C_FLAGS_RELWITHDEBINFO="%{rpmcflags} %{rpmcppflags}" \
-	-DCMAKE_CXX_FLAGS_RELWITHDEBINFO="%{rpmcxxflags} %{rpmcppflags}" \
-	-DZIG_EXTRA_BUILD_ARGS="--build-id=sha1;-Dno-langref=true" \
 	-DZIG_PIE=ON \
 	-DZIG_SHARED_LLVM=ON \
-	-DZIG_TARGET_MCPU=baseline \
 	-DZIG_TARGET_TRIPLE=native \
 	-DZIG_VERSION=%{zigver}
 
-%{__make} stage3
+# build.zig links zigcpp and reads config.h, both produced by the cmake run above
+%{__make} zigcpp
+cd ..
+
+%if %{with bootstrap}
+ZIG=$(pwd)/%{prebuilt_dir}/zig
+%else
+ZIG=%{_bindir}/zig
+%endif
+export ZIG_GLOBAL_CACHE_DIR=$(pwd)/build/zig-cache
+export ZIG_LOCAL_CACHE_DIR=$(pwd)/build/zig-cache
+$ZIG build \
+	--zig-lib=$(pwd)/lib \
+	--prefix $(pwd)/build/stage3 \
+	--build-id=sha1 \
+	-Dconfig_h=$(pwd)/build/config.h \
+	-Dcpu=baseline \
+	-Denable-llvm \
+	-Dno-langref=true \
+	-Doptimize=ReleaseFast \
+	-Dpie \
+	-Dtarget=native \
+	-Dversion-string=%{zigver}
 
 %install
 rm -rf $RPM_BUILD_ROOT
